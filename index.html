@@ -56,6 +56,16 @@
       <div id="course-grid" class="course-grid"></div>
     </main>
 
+    <!-- 导员列表页（与春秋夏并列的第四个标签） -->
+    <main id="page-counselors" class="page" hidden>
+      <div class="page-head-row">
+        <h3>🎓 导员评价</h3>
+        <span class="section-sub">导员由同学们自行添加，可评分、留言、上传图片</span>
+        <button id="btn-add-counselor" class="btn btn-accent">＋ 添加导员</button>
+      </div>
+      <div id="counselor-grid" class="course-grid"></div>
+    </main>
+
     <!-- 课程详情页 -->
     <main id="page-course" class="page" hidden>
       <button id="btn-back" class="btn btn-ghost back-btn">← 返回学期</button>
@@ -67,20 +77,30 @@
       <div id="teacher-panels" class="teacher-panels"></div>
     </main>
 
+    <!-- 导员详情页 -->
+    <main id="page-counselor" class="page" hidden>
+      <button id="btn-back-c" class="btn btn-ghost back-btn">← 返回学期</button>
+      <div class="course-head">
+        <h2 id="c-title"></h2>
+        <p id="c-meta" class="course-meta"></p>
+      </div>
+      <div id="c-panels" class="teacher-panels"></div>
+    </main>
+
     <footer class="app-footer">无穹书院 五字班 · 学生自发维护 · 仅校内参考</footer>
   </div>
 
-  <!-- ========== 添加老师弹窗 ========== -->
-  <div id="modal-add-teacher" class="modal-mask" hidden>
+  <!-- ========== 添加老师/导员弹窗 ========== -->
+  <div id="modal-add-item" class="modal-mask" hidden>
     <div class="modal">
-      <h3>添加老师</h3>
-      <p class="modal-desc">输入为这门课授课的老师姓名（同一课程编号可能有多位老师）</p>
-      <input type="text" id="new-teacher-name" placeholder="老师姓名" maxlength="30" />
+      <h3 id="add-item-title">添加老师</h3>
+      <p id="add-item-desc" class="modal-desc"></p>
+      <input type="text" id="new-item-name" placeholder="姓名" maxlength="30" />
       <div class="modal-actions">
         <button id="btn-cancel-add" class="btn btn-ghost">取消</button>
         <button id="btn-confirm-add" class="btn btn-primary">添加</button>
       </div>
-      <p id="add-teacher-msg" class="msg"></p>
+      <p id="add-item-msg" class="msg"></p>
     </div>
   </div>
 

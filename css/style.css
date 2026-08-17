@@ -421,6 +421,69 @@ input:focus, textarea:focus { border-color: var(--purple); }
 .modal-desc { font-size: 13px; color: var(--text-sub); margin-bottom: 16px; line-height: 1.6; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
 
+/* ================= 导员板块 ================= */
+.page-head-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+.page-head-row h3 { font-size: 20px; }
+.page-head-row .section-sub { font-size: 12px; color: var(--text-sub); flex: 1 1 auto; min-width: 200px; }
+.page-head-row #btn-add-counselor { margin-left: auto; }
+.sem-tab-counselor .sem-emoji { font-size: 22px; }
+.sem-tab-counselor.active { border-color: var(--accent); background: #fff8ec; }
+.sem-tab-counselor.active .sem-name { color: #a87a1e; }
+.counselor-card {
+  border-color: #f0e0b8;
+  background: linear-gradient(180deg, #fffdf5, #ffffff);
+}
+.counselor-card:hover { border-color: var(--accent); }
+.counselor-card .course-id { background: #fdf3dd; color: #a87a1e; }
+
+/* ================= 评价配图 ================= */
+.rating-img {
+  display: block;
+  max-width: 180px;
+  max-height: 140px;
+  border-radius: 8px;
+  margin-top: 8px;
+  cursor: zoom-in;
+  border: 1px solid var(--border);
+  background: #f5f2f7;
+}
+
+/* ================= 图片上传 ================= */
+.img-upload-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.btn-upload { position: relative; cursor: pointer; }
+.upload-hint { font-size: 12px; color: var(--text-sub); }
+.img-preview { position: relative; display: inline-block; }
+.img-preview img {
+  max-width: 160px;
+  max-height: 110px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  display: block;
+  background: #f5f2f7;
+}
+.img-remove {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: var(--danger);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.img-remove:hover { filter: brightness(1.15); }
+
 /* ================= 页脚 ================= */
 .app-footer {
   text-align: center;

@@ -53,7 +53,10 @@ const SEMESTERS = {
 let currentUser = null;        // { student_id }
 let currentSemester = "autumn";
 let currentCourse = null;      // { id, name }
+let currentCounselor = null;   // 当前查看的导员 { id, name, ... }
 let teachersCache = [];        // [{ id, course_id, name, ratings: [...], avg }]
+let counselorsCache = [];      // 导员缓存 [{ id, semester, name, ratings, avg, myRating }]
+let addTarget = "teacher";     // 添加弹窗目标：teacher | counselor
 let realtimeChannel = null;    // 当前课程的实时订阅通道
 let reloadTimer = null;        // 实时事件防抖定时器
 let pendingReload = false;     // 用户正在输入时暂缓的刷新
@@ -125,7 +128,7 @@ function enterApp(studentId) {
 }
 
 function handleLogout() {
-  stopCourseRealtime();
+  stopRealtime();
   currentUser = null;
   localStorage.removeItem(SESSION_KEY);
   viewApp.hidden = true;
@@ -156,13 +159,28 @@ function renderSemesterTabs() {
     btn.addEventListener("click", () => switchSemester(key));
     tabsEl.appendChild(btn);
   });
+  // 第四个标签：导员（全局板块，不按学期区分）
+  const btn = document.createElement("button");
+  btn.className = "sem-tab sem-tab-counselor" + (currentSemester === "counselor" ? " active" : "");
+  btn.dataset.sem = "counselor";
+  btn.innerHTML = `
+    <span class="sem-emoji">🎓</span>
+    <span class="sem-name">导员</span>
+    <span class="sem-desc">全体导员 · 可评分/留言/传图</span>`;
+  btn.addEventListener("click", () => switchSemester("counselor"));
+  tabsEl.appendChild(btn);
 }
 
 function switchSemester(key) {
   currentSemester = key;
   document.querySelectorAll(".sem-tab").forEach((t) =>
     t.classList.toggle("active", t.dataset.sem === key));
-  renderCourseGrid();
+  const isCounselorTab = key === "counselor";
+  $("#page-semester").hidden = isCounselorTab;
+  $("#page-counselors").hidden = !isCounselorTab;
+  if (isCounselorTab) renderCounselorGrid();
+  else renderCourseGrid();
+  subscribeRealtime();
 }
 
 function renderCourseGrid() {
@@ -194,24 +212,132 @@ function renderCourseGrid() {
 }
 
 // ============================================================
+// 导员评价（每个学期独立，由学生自行添加，支持评分/留言/配图）
+// ============================================================
+async function renderCounselorGrid() {
+  const grid = $("#counselor-grid");
+  if (!grid) return;
+  grid.innerHTML = '<div class="empty-tip" style="padding:24px 0">加载中…</div>';
+
+  const { data: counselors, error: errC } = await sb
+    .from("counselors").select("id, semester, name, created_by").order("created_at");
+  if (errC) {
+    grid.innerHTML = `<div class="empty-tip">导员加载失败：${escapeHtml(errC.message)}</div>`;
+    return;
+  }
+  const ids = counselors.map((c) => c.id);
+  let ratings = [];
+  if (ids.length) {
+    const { data, error: errR } = await sb
+      .from("counselor_ratings").select("id, counselor_id, student_id, score, comment, image_url, created_at, updated_at")
+      .in("counselor_id", ids).order("created_at", { ascending: true });
+    if (errR) {
+      grid.innerHTML = `<div class="empty-tip">导员加载失败：${escapeHtml(errR.message)}</div>`;
+      return;
+    }
+    ratings = data || [];
+  }
+
+  counselorsCache = counselors.map((c) => ({
+    ...c,
+    ratings: ratings.filter((r) => r.counselor_id === c.id),
+  }));
+  counselorsCache.forEach((c) => {
+    const n = c.ratings.length;
+    c.avg = n ? c.ratings.reduce((s, r) => s + r.score, 0) / n : null;
+    c.myRating = c.ratings.find((r) => r.student_id === currentUser.student_id) || null;
+  });
+
+  if (!counselorsCache.length) {
+    grid.innerHTML = '<div class="empty-tip" style="padding:24px 0">还没有导员面板，点右上角「＋ 添加导员」创建</div>';
+    return;
+  }
+  grid.innerHTML = "";
+  counselorsCache.forEach((c) => {
+    const card = document.createElement("div");
+    card.className = "course-card counselor-card";
+    card.innerHTML = `
+      <span class="course-id">🎓 导员</span>
+      <div class="course-name">${escapeHtml(c.name)}</div>
+      <div class="course-num"><span class="dot">●</span> ${c.avg !== null ? "平均分 " + c.avg.toFixed(1) + " · " : ""}${c.ratings.length} 条评价 · 点击查看</div>`;
+    card.addEventListener("click", () => openCounselor(c));
+    grid.appendChild(card);
+  });
+}
+
+function openCounselor(c) {
+  currentCounselor = c;
+  currentCourse = null;
+  $("#page-semester").hidden = true;
+  $("#page-counselors").hidden = true;
+  $("#page-course").hidden = true;
+  $("#page-counselor").hidden = false;
+  $("#c-title").textContent = `导员：${c.name}`;
+  $("#c-meta").textContent = `全体导员评价 · 实时同步已开启`;
+  $("#c-panels").innerHTML = '<div class="empty-tip">加载中…</div>';
+  loadCounselorDetail();
+  subscribeRealtime();
+}
+
+async function loadCounselorDetail() {
+  const panelsEl = $("#c-panels");
+  const { data: counselor, error: errC } = await sb
+    .from("counselors").select("id, semester, name, created_by").eq("id", currentCounselor.id).maybeSingle();
+  if (errC || !counselor) {
+    panelsEl.innerHTML = '<div class="empty-tip">导员不存在或已删除</div>';
+    return;
+  }
+  const { data: ratings, error: errR } = await sb
+    .from("counselor_ratings").select("id, counselor_id, student_id, score, comment, image_url, created_at, updated_at")
+    .eq("counselor_id", counselor.id).order("created_at", { ascending: true });
+  if (errR) {
+    panelsEl.innerHTML = `<div class="empty-tip">加载失败：${escapeHtml(errR.message)}</div>`;
+    return;
+  }
+  const item = { ...counselor, ratings: ratings || [] };
+  const n = item.ratings.length;
+  item.avg = n ? item.ratings.reduce((s, r) => s + r.score, 0) / n : null;
+  item.myRating = item.ratings.find((r) => r.student_id === currentUser.student_id) || null;
+  currentCounselor = item;
+  renderPanels(panelsEl, [item], "counselor");
+}
+
+function goBackFromCounselor() {
+  stopRealtime();
+  $("#page-counselor").hidden = true;
+  $("#page-course").hidden = true;
+  $("#page-counselors").hidden = false;
+  $("#page-semester").hidden = true;
+  currentCounselor = null;
+  renderCounselorGrid();
+  subscribeRealtime();
+}
+
+// ============================================================
 // 课程详情页
 // ============================================================
 async function openCourse(course) {
   currentCourse = course;
+  currentCounselor = null;
   $("#page-semester").hidden = true;
+  $("#page-counselors").hidden = true;
   $("#page-course").hidden = false;
   $("#course-title").textContent = `${course.name}`;
   $("#course-meta").textContent = `课程编号 ${course.id} · ${SEMESTERS[currentSemester].emoji} ${SEMESTERS[currentSemester].name} · 实时同步已开启`;
   $("#teacher-panels").innerHTML = '<div class="empty-tip">加载中…</div>';
   await loadTeachers();
-  subscribeCourseRealtime();
+  subscribeRealtime();
 }
 
 function goBackToSemester() {
-  stopCourseRealtime();
+  stopRealtime();
   $("#page-course").hidden = true;
+  $("#page-counselor").hidden = true;
+  $("#page-counselors").hidden = true;
   $("#page-semester").hidden = false;
   currentCourse = null;
+  currentCounselor = null;
+  subscribeRealtime();
 }
 
 async function loadTeachers() {
@@ -254,39 +380,48 @@ async function loadTeachers() {
   renderTeacherPanels();
 }
 
-function renderTeacherPanels() {
+function renderPanels(panelsEl, items, kind) {
   captureDrafts(); // 先存草稿，防止重建时丢失输入
-  const panelsEl = $("#teacher-panels");
-  if (!teachersCache.length) {
-    panelsEl.innerHTML = `
-      <div class="empty-tip">这门课还没有老师面板<br>点击右上角「＋ 添加老师」创建第一个评价面板</div>`;
+  if (!items.length) {
+    const tip = kind === "counselor"
+      ? '<div class="empty-tip">该导员暂无评价<br>来写第一条评价吧</div>'
+      : '<div class="empty-tip">这门课还没有老师面板<br>点击右上角「＋ 添加老师」创建第一个评价面板</div>';
+    panelsEl.innerHTML = tip;
     return;
   }
   panelsEl.innerHTML = "";
-  teachersCache.forEach((t, idx) => {
-    panelsEl.appendChild(buildTeacherPanel(t, idx));
+  items.forEach((item) => {
+    panelsEl.appendChild(buildRatingPanel(item, kind));
   });
 }
 
-function buildTeacherPanel(t, idx) {
+function renderTeacherPanels() {
+  renderPanels($("#teacher-panels"), teachersCache, "teacher");
+}
+
+function buildRatingPanel(item, kind) {
   const panel = document.createElement("div");
   panel.className = "teacher-panel";
-  panel.dataset.teacherId = t.id;
+  panel.dataset.itemId = item.id;
 
-  const avgText = t.avg !== null ? t.avg.toFixed(1) : "—";
-  const avgColor = avgColorOf(t.avg);
-  const ratingCount = t.ratings.length;
+  const avgText = item.avg !== null ? item.avg.toFixed(1) : "—";
+  const avgColor = avgColorOf(item.avg);
+  const ratingCount = item.ratings.length;
+  const isCounselor = kind === "counselor";
 
   let ratingsHtml = "";
   if (!ratingCount) {
     ratingsHtml = '<div class="no-ratings">暂无评价，来做第一个评价的人吧</div>';
   } else {
-    ratingsHtml = t.ratings.map((r) => {
+    ratingsHtml = item.ratings.map((r) => {
       const badgeColor = scoreColorOf(r.score);
       const time = formatTime(r.updated_at || r.created_at);
       const comment = r.comment.trim()
         ? `<div class="rating-comment">${escapeHtml(r.comment)}</div>`
         : `<div class="rating-comment empty">（未留言）</div>`;
+      const img = r.image_url
+        ? `<img class="rating-img" src="${escapeHtml(r.image_url)}" alt="评价配图" loading="lazy" onclick="viewImage('${escapeHtml(r.image_url)}')" />`
+        : "";
       return `
         <div class="rating-item">
           <div class="rating-user">${escapeHtml(r.student_id).slice(-2)}</div>
@@ -297,40 +432,52 @@ function buildTeacherPanel(t, idx) {
               <span class="rating-time">${time}</span>
             </div>
             ${comment}
+            ${img}
           </div>
         </div>`;
     }).join("");
   }
 
-  const my = t.myRating;
-  const draft = draftCache[t.id];
+  const my = item.myRating;
+  const draft = draftCache[item.id];
   const myScore = draft ? draft.score : (my ? my.score : 5);
-  const canDeleteTeacher = t.created_by && t.created_by === currentUser.student_id;
+  const canDeleteItem = item.created_by && item.created_by === currentUser.student_id;
 
   panel.innerHTML = `
     <div class="teacher-head">
-      <div class="teacher-avatar">${escapeHtml(t.name.charAt(0))}</div>
+      <div class="teacher-avatar">${escapeHtml(item.name.charAt(0))}</div>
       <div class="teacher-info">
-        <div class="teacher-name">${escapeHtml(t.name)}</div>
-        <div class="teacher-stats">${ratingCount} 条评价${canDeleteTeacher ? " · 我添加的" : ""}</div>
+        <div class="teacher-name">${escapeHtml(item.name)}</div>
+        <div class="teacher-stats">${ratingCount} 条评价${canDeleteItem ? " · 我添加的" : ""}</div>
       </div>
       <div class="avg-box">
         <div class="avg-num" style="color:${avgColor}">${avgText}</div>
         <div class="avg-label">平均分 / 10</div>
       </div>
-      ${canDeleteTeacher ? `<button class="btn btn-danger btn-del-teacher">删除</button>` : ""}
+      ${canDeleteItem ? `<button class="btn btn-danger btn-del-item">删除${isCounselor ? "导员" : ""}</button>` : ""}
     </div>
     <div class="ratings-list">${ratingsHtml}</div>
     <div class="rate-box">
       <div class="rate-title">
         ${my ? "修改我的评分" : "我来评分"}
-        ${my ? `<span class="my-score">（当前 ${my.score} 分${my.comment ? "，已留言" : "，未留言"}）</span>` : ""}
+        ${my ? `<span class="my-score">（当前 ${my.score} 分${my.comment ? "，已留言" : "，未留言"}${my.image_url ? "，有配图" : ""}）</span>` : ""}
       </div>
       <div class="score-row">
         <input type="range" min="0" max="10" step="1" value="${myScore}" class="score-slider" />
         <div class="score-value">${myScore}.0</div>
       </div>
       <textarea class="rate-comment" maxlength="500" placeholder="留言（可选，将展示在评价面板上）">${escapeHtml(draft ? draft.comment : (my ? my.comment : ""))}</textarea>
+      ${isCounselor ? `
+      <div class="img-upload-row">
+        <label class="btn btn-ghost btn-upload">📷 上传图片（可选）
+          <input type="file" accept="image/*" class="file-input" hidden />
+        </label>
+        <span class="upload-hint">jpg/png，自动压缩，点击图片可查看大图</span>
+        <div class="img-preview" ${my && my.image_url ? "" : "hidden"}>
+          <img src="${my && my.image_url ? escapeHtml(my.image_url) : ""}" alt="预览" />
+          <button type="button" class="img-remove" title="移除本次选择的图片">✕</button>
+        </div>
+      </div>` : ""}
       <div class="rate-actions">
         ${my ? `<button class="btn btn-danger btn-del-rating">删除我的评价</button>` : ""}
         <button class="btn btn-primary btn-submit-rate">${my ? "更新评分" : "提交评分"}</button>
@@ -344,17 +491,56 @@ function buildTeacherPanel(t, idx) {
     scoreVal.textContent = Number(slider.value).toFixed(1);
   });
 
+  // 图片选择（仅导员评价）
+  let selectedFile = null;
+  const fileInput = panel.querySelector(".file-input");
+  const previewBox = panel.querySelector(".img-preview");
+  if (fileInput) {
+    fileInput.addEventListener("change", async () => {
+      const f = fileInput.files[0];
+      if (!f) return;
+      if (f.size > 15 * 1024 * 1024) {
+        alert("图片过大（超过 15MB），请压缩后再传");
+        fileInput.value = "";
+        return;
+      }
+      try {
+        selectedFile = await resizeImage(f);
+        previewBox.querySelector("img").src = URL.createObjectURL(selectedFile);
+        previewBox.hidden = false;
+      } catch (e) {
+        alert("图片处理失败：" + e.message);
+        fileInput.value = "";
+      }
+    });
+    previewBox.querySelector(".img-remove").addEventListener("click", () => {
+      selectedFile = null;
+      fileInput.value = "";
+      if (my && my.image_url) {
+        // 已有配图时点击 ✕ 仅撤销本次选择，原图保留
+        previewBox.querySelector("img").src = my.image_url;
+        previewBox.hidden = false;
+      } else {
+        previewBox.hidden = true;
+      }
+    });
+  }
+
   // 提交评分
   const btnSubmit = panel.querySelector(".btn-submit-rate");
-  btnSubmit.addEventListener("click", () => submitRating(t.id, Number(slider.value), panel.querySelector(".rate-comment").value.trim()));
+  btnSubmit.addEventListener("click", () => {
+    btnSubmit.disabled = true;
+    submitRating(kind, item.id, Number(slider.value), panel.querySelector(".rate-comment").value.trim(), selectedFile)
+      .finally(() => { btnSubmit.disabled = false; });
+  });
 
   // 删除自己的评价（仅已评分的显示）
   const btnDelRating = panel.querySelector(".btn-del-rating");
-  if (btnDelRating) btnDelRating.addEventListener("click", () => deleteMyRating(t.id));
+  if (btnDelRating) btnDelRating.addEventListener("click", () => deleteMyRating(kind, item.id));
 
-  // 删除老师（仅添加者显示）
-  const btnDelTeacher = panel.querySelector(".btn-del-teacher");
-  if (btnDelTeacher) btnDelTeacher.addEventListener("click", () => deleteTeacher(t.id));
+  // 删除老师/导员（仅添加者显示）
+  const btnDelItem = panel.querySelector(".btn-del-item");
+  if (btnDelItem) btnDelItem.addEventListener("click", () => deleteItem(kind, item.id));
 
   // 失焦时若有待处理的刷新，执行它（用户在打字期间刷新已被暂缓）
   const ta = panel.querySelector(".rate-comment");
@@ -362,7 +548,7 @@ function buildTeacherPanel(t, idx) {
     ta.addEventListener("blur", () => {
       if (pendingReload) {
         pendingReload = false;
-        loadTeachers();
+        reloadCurrent();
       }
     });
   }
@@ -371,52 +557,90 @@ function buildTeacherPanel(t, idx) {
 }
 
 // ============================================================
-// 评分提交（同一学生同一老师：有则更新，无则插入）
+// 评分提交（同一学生同一对象：有则更新，无则插入）
+// kind: teacher | counselor；file: 导员评价可选配图
 // ============================================================
-async function submitRating(teacherId, score, comment) {
+async function submitRating(kind, itemId, score, comment, file) {
   const sid = currentUser.student_id;
-  const my = teachersCache.find((t) => t.id === teacherId)?.myRating;
-  let error = null;
+  const isCounselor = kind === "counselor";
+  const table = isCounselor ? "counselor_ratings" : "ratings";
+  const fk = isCounselor ? "counselor_id" : "teacher_id";
+  const cache = isCounselor ? counselorsCache : teachersCache;
+  const my = cache.find((x) => x.id === itemId)?.myRating;
+  let imageUrl = my ? my.image_url : null;
 
+  // 有配图则先上传（已自动压缩）
+  if (file) {
+    try {
+      imageUrl = await uploadCounselorImage(file, itemId);
+      // 覆盖旧图时顺带清理旧文件（尽力而为）
+      if (my && my.image_url && my.image_url !== imageUrl) deleteStoredImage(my.image_url);
+    } catch (e) {
+      alert("图片上传失败：" + e.message + "\n（请确认已在 SQL Editor 执行建表和 Storage 策略）");
+      return;
+    }
+  }
+
+  let error = null;
   if (my) {
     ({ error } = await sb
-      .from("ratings")
-      .update({ score, comment, updated_at: new Date().toISOString() })
+      .from(table)
+      .update({ score, comment, image_url: imageUrl, updated_at: new Date().toISOString() })
       .eq("id", my.id));
   } else {
-    ({ error } = await sb
-      .from("ratings")
-      .insert({ teacher_id: teacherId, student_id: sid, score, comment }));
+    const row = { [fk]: itemId, student_id: sid, score, comment };
+    if (imageUrl) row.image_url = imageUrl;
+    ({ error } = await sb.from(table).insert(row));
   }
 
   if (error) {
     alert("提交失败：" + error.message);
     return;
   }
-  await loadTeachers(); // 刷新面板
+  await reloadCurrent(); // 刷新当前视图
 }
 
 // ============================================================
-// 添加老师
+// 添加老师 / 导员（同一个弹窗，按 addTarget 区分）
 // ============================================================
-function openAddTeacherModal() {
-  $("#new-teacher-name").value = "";
-  $("#add-teacher-msg").textContent = "";
-  $("#modal-add-teacher").hidden = false;
-  $("#new-teacher-name").focus();
+function openAddItemModal(target) {
+  addTarget = target;
+  const isCounselor = target === "counselor";
+  $("#add-item-title").textContent = isCounselor ? "添加导员" : "添加老师";
+  $("#add-item-desc").textContent = isCounselor
+    ? "输入导员姓名（如：王导）。导员板块面向全体同学，可评分、留言、上传图片。"
+    : "输入为这门课授课的老师姓名（同一课程编号可能有多位老师）";
+  $("#new-item-name").placeholder = isCounselor ? "导员姓名" : "老师姓名";
+  $("#new-item-name").value = "";
+  $("#add-item-msg").textContent = "";
+  $("#modal-add-item").hidden = false;
+  $("#new-item-name").focus();
 }
 
-function closeAddTeacherModal() {
-  $("#modal-add-teacher").hidden = true;
+function closeAddItemModal() {
+  $("#modal-add-item").hidden = true;
 }
 
-async function confirmAddTeacher() {
-  const name = $("#new-teacher-name").value.trim();
-  const msgEl = $("#add-teacher-msg");
-  if (!name) return showMsg(msgEl, "请输入老师姓名", "err");
+async function confirmAddItem() {
+  const name = $("#new-item-name").value.trim();
+  const msgEl = $("#add-item-msg");
+  if (!name) return showMsg(msgEl, "请输入姓名", "err");
   if (name.length > 30) return showMsg(msgEl, "姓名过长（最多 30 字）", "err");
 
-  // 同名老师不重复添加
+  if (addTarget === "counselor") {
+    // 同名导员不重复添加（导员为全局板块，不区分学期）
+    const { data: exist } = await sb
+      .from("counselors").select("id").eq("name", name).maybeSingle();
+    if (exist) return showMsg(msgEl, "这位导员已存在，无需重复添加", "err");
+    const { error } = await sb
+      .from("counselors").insert({ semester: "", name, created_by: currentUser.student_id });
+    if (error) return showMsg(msgEl, "添加失败：" + error.message, "err");
+    closeAddItemModal();
+    renderCounselorGrid();
+    return;
+  }
+
+  // 老师：同课程编号下同名不重复添加
   const { data: exist } = await sb
     .from("teachers").select("id").eq("course_id", currentCourse.id).eq("name", name).maybeSingle();
   if (exist) return showMsg(msgEl, "这位老师已存在，无需重复添加", "err");
@@ -425,19 +649,26 @@ async function confirmAddTeacher() {
     .from("teachers").insert({ course_id: currentCourse.id, name, created_by: currentUser.student_id });
   if (error) return showMsg(msgEl, "添加失败：" + error.message, "err");
 
-  closeAddTeacherModal();
+  closeAddItemModal();
   await loadTeachers();
 }
 
 // ============================================================
 // 实时同步（Supabase Realtime）
-// 别人添加老师 / 评分 / 改分后，当前页面自动刷新数据，无需手动刷新
+// 别人添加 / 评分 / 删除后，当前页面自动刷新数据，无需手动刷新
 // ============================================================
-function stopCourseRealtime() {
+function stopRealtime() {
   if (realtimeChannel) {
     sb.removeChannel(realtimeChannel);
     realtimeChannel = null;
   }
+}
+
+// 按当前视图刷新数据
+function reloadCurrent() {
+  if (currentCounselor) loadCounselorDetail();
+  else if (currentCourse) loadTeachers();
+  else if (currentSemester === "counselor") renderCounselorGrid();
 }
 
 function scheduleReload() {
@@ -450,7 +681,7 @@ function scheduleReload() {
       return;
     }
     pendingReload = false;
-    loadTeachers();
+    reloadCurrent();
   }, 400);
 }
 
@@ -463,7 +694,7 @@ function isUserTyping() {
 function captureDrafts() {
   draftCache = {};
   document.querySelectorAll(".teacher-panel").forEach((panel) => {
-    const id = panel.dataset.teacherId;
+    const id = panel.dataset.itemId;
     const ta = panel.querySelector(".rate-comment");
     const sl = panel.querySelector(".score-slider");
     if (!ta && !sl) return;
@@ -474,51 +705,165 @@ function captureDrafts() {
   });
 }
 
-function subscribeCourseRealtime() {
-  stopCourseRealtime();
-  const cid = currentCourse.id;
-  realtimeChannel = sb
-    .channel("course-realtime-" + cid)
-    // 有人添加/删除当前课程的老师
-    .on("postgres_changes", { event: "*", schema: "public", table: "teachers" }, (payload) => {
-      const t = payload.new || payload.old;
-      if (t && t.course_id === cid) scheduleReload();
-    })
-    // 有人评分 / 改分 / 删评
-    .on("postgres_changes", { event: "*", schema: "public", table: "ratings" }, () => {
-      scheduleReload();
-    })
-    .subscribe();
+// 根据当前所处页面订阅相应事件
+function subscribeRealtime() {
+  stopRealtime();
+
+  // 课程详情页：该课程的老师 + 所有评分
+  if (currentCourse) {
+    const cid = currentCourse.id;
+    realtimeChannel = sb
+      .channel("course-realtime-" + cid)
+      .on("postgres_changes", { event: "*", schema: "public", table: "teachers" }, (payload) => {
+        const t = payload.new || payload.old;
+        if (t && t.course_id === cid) scheduleReload();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "ratings" }, () => {
+        scheduleReload();
+      })
+      .subscribe();
+    return;
+  }
+
+  // 导员详情页：该导员的评分 + 导员本身的增删
+  if (currentCounselor) {
+    const cid = currentCounselor.id;
+    realtimeChannel = sb
+      .channel("counselor-realtime-" + cid)
+      .on("postgres_changes", { event: "*", schema: "public", table: "counselors" }, (payload) => {
+        const c = payload.new || payload.old;
+        if (c && c.id === cid) {
+          if (payload.eventType === "DELETE") {
+            alert("该导员已被添加者删除，返回学期页");
+            goBackFromCounselor();
+          } else {
+            scheduleReload();
+          }
+        }
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "counselor_ratings" }, (payload) => {
+        const r = payload.new || payload.old;
+        if (r && r.counselor_id === cid) scheduleReload();
+      })
+      .subscribe();
+    return;
+  }
+
+  // 导员列表页：全部导员的增删 + 全部导员评分（刷新卡片平均分）
+  if (currentSemester === "counselor") {
+    realtimeChannel = sb
+      .channel("counselors-list-realtime")
+      .on("postgres_changes", { event: "*", schema: "public", table: "counselors" }, () => {
+        scheduleReload();
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "counselor_ratings" }, () => {
+        scheduleReload();
+      })
+      .subscribe();
+    return;
+  }
+
+  // 学期页：课程列表为静态数据，无需订阅
 }
 
 // ============================================================
 // 删除功能
-// 1) 学生删除自己对某位老师的评价（评分+留言一起删）
-// 2) 添加老师的人删除该老师（其下所有评价级联删除）
+// 1) 学生删除自己的评价（评分+留言+配图一起删）
+// 2) 添加者删除老师/导员（其下所有评价级联删除）
 // ============================================================
-async function deleteMyRating(teacherId) {
-  const my = teachersCache.find((t) => t.id === teacherId)?.myRating;
+async function deleteMyRating(kind, itemId) {
+  const isCounselor = kind === "counselor";
+  const table = isCounselor ? "counselor_ratings" : "ratings";
+  const cache = isCounselor ? counselorsCache : teachersCache;
+  const my = cache.find((x) => x.id === itemId)?.myRating;
   if (!my) return;
-  if (!confirm("确定删除你对这位老师的评价吗？删除后不可恢复。")) return;
-  const { error } = await sb.from("ratings").delete().eq("id", my.id);
+  if (!confirm(`确定删除你对这位${isCounselor ? "导员" : "老师"}的评价吗？删除后不可恢复。`)) return;
+  const { error } = await sb.from(table).delete().eq("id", my.id);
   if (error) {
     alert("删除失败：" + error.message);
     return;
   }
-  await loadTeachers();
+  if (my.image_url) deleteStoredImage(my.image_url); // 尽力清理配图
+  await reloadCurrent();
 }
 
-async function deleteTeacher(teacherId) {
-  const t = teachersCache.find((x) => x.id === teacherId);
-  if (!t) return;
-  const count = t.ratings.length;
-  if (!confirm(`确定删除老师「${t.name}」吗？${count ? `其下 ${count} 条评价将一并删除，` : ""}删除后不可恢复。`)) return;
-  const { error } = await sb.from("teachers").delete().eq("id", teacherId);
+async function deleteItem(kind, itemId) {
+  const isCounselor = kind === "counselor";
+  const table = isCounselor ? "counselors" : "teachers";
+  const cache = isCounselor ? counselorsCache : teachersCache;
+  const item = cache.find((x) => x.id === itemId);
+  if (!item) return;
+  const count = item.ratings.length;
+  const label = isCounselor ? "导员" : "老师";
+  if (!confirm(`确定删除${label}「${item.name}」吗？${count ? `其下 ${count} 条评价将一并删除，` : ""}删除后不可恢复。`)) return;
+  const { error } = await sb.from(table).delete().eq("id", itemId);
   if (error) {
     alert("删除失败：" + error.message);
     return;
   }
-  await loadTeachers();
+  // 清理该导员名下全部配图（尽力而为）
+  if (isCounselor) item.ratings.forEach((r) => { if (r.image_url) deleteStoredImage(r.image_url); });
+  await reloadCurrent();
+}
+
+// ============================================================
+// 图片上传（导员评价配图，Supabase Storage）
+// ============================================================
+const IMG_BUCKET = "counselor-images";
+
+// 客户端压缩：最长边限制 1280px，JPEG 质量 0.82
+function resizeImage(file, maxSize = 1280, quality = 0.82) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        canvas.toBlob((blob) => {
+          URL.revokeObjectURL(url);
+          if (blob) resolve(new File([blob], "counselor-img.jpg", { type: "image/jpeg" }));
+          else resolve(file);
+        }, "image/jpeg", quality);
+      } catch (e) {
+        URL.revokeObjectURL(url);
+        reject(e);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("无法解析该图片")); };
+    img.src = url;
+  });
+}
+
+async function uploadCounselorImage(file, counselorId) {
+  const path = `${counselorId}/${currentUser.student_id}_${Date.now()}.jpg`;
+  const { error } = await sb.storage.from(IMG_BUCKET).upload(path, file, {
+    contentType: "image/jpeg",
+    upsert: false,
+  });
+  if (error) throw new Error(error.message);
+  return sb.storage.from(IMG_BUCKET).getPublicUrl(path).data.publicUrl;
+}
+
+// 根据公开 URL 删除存储文件（尽力而为，失败不阻塞主流程）
+async function deleteStoredImage(publicUrl) {
+  try {
+    const marker = `/object/public/${IMG_BUCKET}/`;
+    const idx = publicUrl.indexOf(marker);
+    if (idx < 0) return;
+    const path = publicUrl.slice(idx + marker.length);
+    await sb.storage.from(IMG_BUCKET).remove([path]);
+  } catch (e) { /* 忽略 */ }
+}
+
+// 点击查看大图
+function viewImage(url) {
+  window.open(url, "_blank");
 }
 
 // ============================================================
@@ -584,15 +929,17 @@ function bindEvents() {
   $("#form-register").addEventListener("submit", handleRegister);
   $("#btn-logout").addEventListener("click", handleLogout);
   $("#btn-back").addEventListener("click", goBackToSemester);
-  $("#btn-add-teacher").addEventListener("click", openAddTeacherModal);
-  $("#btn-cancel-add").addEventListener("click", closeAddTeacherModal);
-  $("#btn-confirm-add").addEventListener("click", confirmAddTeacher);
-  $("#new-teacher-name").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") confirmAddTeacher();
+  $("#btn-back-c").addEventListener("click", goBackFromCounselor);
+  $("#btn-add-teacher").addEventListener("click", () => openAddItemModal("teacher"));
+  $("#btn-add-counselor").addEventListener("click", () => openAddItemModal("counselor"));
+  $("#btn-cancel-add").addEventListener("click", closeAddItemModal);
+  $("#btn-confirm-add").addEventListener("click", confirmAddItem);
+  $("#new-item-name").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") confirmAddItem();
   });
   // 点击遮罩关闭弹窗
-  $("#modal-add-teacher").addEventListener("click", (e) => {
-    if (e.target.id === "modal-add-teacher") closeAddTeacherModal();
+  $("#modal-add-item").addEventListener("click", (e) => {
+    if (e.target.id === "modal-add-item") closeAddItemModal();
   });
 }
 
