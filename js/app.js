@@ -56,6 +56,7 @@ let currentCourse = null;      // { id, name }
 let currentCounselor = null;   // 当前查看的导员 { id, name, ... }
 let teachersCache = [];        // [{ id, course_id, name, ratings: [...], avg }]
 let counselorsCache = [];      // 导员缓存 [{ id, semester, name, ratings, avg, myRating }]
+let customCoursesCache = [];   // 同学自建课程缓存 [{ id, semester, course_id, name, created_by }]
 let addTarget = "teacher";     // 添加弹窗目标：teacher | counselor
 let realtimeChannel = null;    // 当前课程的实时订阅通道
 let reloadTimer = null;        // 实时事件防抖定时器
@@ -183,11 +184,32 @@ function switchSemester(key) {
   subscribeRealtime();
 }
 
-function renderCourseGrid() {
+async function renderCourseGrid() {
   const grid = $("#course-grid");
   grid.innerHTML = "";
-  const list = COURSES[currentSemester];
-  if (!list || !list.length) {
+
+  // 拉取同学自建的课程
+  const { data: customs, error: errC } = await sb
+    .from("custom_courses").select("id, semester, course_id, name, created_by")
+    .eq("semester", currentSemester).order("created_at");
+  if (errC) {
+    grid.innerHTML = `<div class="empty-tip">课程加载失败：${escapeHtml(errC.message)}</div>`;
+    return;
+  }
+  customCoursesCache = customs || [];
+
+  const builtin = COURSES[currentSemester] || [];
+  const list = [
+    ...builtin,
+    ...customCoursesCache.map((c) => ({
+      id: c.course_id,
+      name: c.name,
+      custom: true,
+      customId: c.id,
+      createdBy: c.created_by,
+    })),
+  ];
+  if (!list.length) {
     grid.innerHTML = '<div class="empty-tip">该学期暂无课程数据</div>';
     return;
   }
@@ -200,13 +222,22 @@ function renderCourseGrid() {
 
   byId.forEach((group) => {
     const card = document.createElement("div");
-    card.className = "course-card";
+    card.className = "course-card" + (group.some((c) => c.custom) ? " custom-course-card" : "");
     const first = group[0];
+    const isCustom = !!first.custom;
+    const canDeleteCourse = isCustom && first.createdBy === currentUser.student_id;
     card.innerHTML = `
-      <span class="course-id">${first.id}</span>
-      <div class="course-name">${first.name}</div>
-      <div class="course-num"><span class="dot">●</span> 点击查看老师评价</div>`;
+      <span class="course-id">${first.id}${isCustom ? " · 自建" : ""}</span>
+      <div class="course-name">${escapeHtml(first.name)}</div>
+      <div class="course-num"><span class="dot">●</span> 点击查看老师评价${isCustom ? "（同学添加）" : ""}</div>
+      ${canDeleteCourse ? `<button class="btn btn-danger btn-del-course">删除课程</button>` : ""}`;
     card.addEventListener("click", () => openCourse(first));
+    if (canDeleteCourse) {
+      card.querySelector(".btn-del-course").addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteCustomCourse(first);
+      });
+    }
     grid.appendChild(card);
   });
 }
@@ -605,12 +636,28 @@ async function submitRating(kind, itemId, score, comment, file) {
 // ============================================================
 function openAddItemModal(target) {
   addTarget = target;
+  const idInput = $("#new-item-id");
+  if (target === "course") {
+    $("#add-item-title").textContent = "添加课程";
+    $("#add-item-desc").textContent = "输入课程名称与课程编号（编号为纯数字）。添加后会与内置课程一起展示，可正常添加老师并评价。";
+    $("#new-item-name").placeholder = "课程名称（如：大学语文）";
+    $("#new-item-name").maxLength = 50;
+    $("#new-item-name").value = "";
+    idInput.hidden = false;
+    idInput.value = "";
+    $("#add-item-msg").textContent = "";
+    $("#modal-add-item").hidden = false;
+    $("#new-item-name").focus();
+    return;
+  }
+  idInput.hidden = true;
   const isCounselor = target === "counselor";
   $("#add-item-title").textContent = isCounselor ? "添加导员" : "添加老师";
   $("#add-item-desc").textContent = isCounselor
     ? "输入导员姓名（如：王导）。导员板块面向全体同学，可评分、留言、上传图片。"
     : "输入为这门课授课的老师姓名（同一课程编号可能有多位老师）";
   $("#new-item-name").placeholder = isCounselor ? "导员姓名" : "老师姓名";
+  $("#new-item-name").maxLength = 30;
   $("#new-item-name").value = "";
   $("#add-item-msg").textContent = "";
   $("#modal-add-item").hidden = false;
@@ -624,8 +671,26 @@ function closeAddItemModal() {
 async function confirmAddItem() {
   const name = $("#new-item-name").value.trim();
   const msgEl = $("#add-item-msg");
-  if (!name) return showMsg(msgEl, "请输入姓名", "err");
-  if (name.length > 30) return showMsg(msgEl, "姓名过长（最多 30 字）", "err");
+  if (!name) return showMsg(msgEl, "请输入名称", "err");
+  if (name.length > 50) return showMsg(msgEl, "名称过长（最多 50 字）", "err");
+
+  if (addTarget === "course") {
+    const cid = $("#new-item-id").value.trim();
+    if (!/^\d{4,12}$/.test(cid)) return showMsg(msgEl, "课程编号应为 4~12 位纯数字", "err");
+    // 内置课程已存在
+    const builtin = (COURSES[currentSemester] || []).find((c) => c.id === cid);
+    if (builtin) return showMsg(msgEl, `该课程编号已在内置列表中（${builtin.name}），无需添加`, "err");
+    // 同学已添加过
+    const { data: exist } = await sb
+      .from("custom_courses").select("id").eq("semester", currentSemester).eq("course_id", cid).maybeSingle();
+    if (exist) return showMsg(msgEl, "这门课已经被添加过了", "err");
+    const { error } = await sb
+      .from("custom_courses").insert({ semester: currentSemester, course_id: cid, name, created_by: currentUser.student_id });
+    if (error) return showMsg(msgEl, "添加失败：" + error.message, "err");
+    closeAddItemModal();
+    renderCourseGrid();
+    return;
+  }
 
   if (addTarget === "counselor") {
     // 同名导员不重复添加（导员为全局板块，不区分学期）
@@ -669,6 +734,7 @@ function reloadCurrent() {
   if (currentCounselor) loadCounselorDetail();
   else if (currentCourse) loadTeachers();
   else if (currentSemester === "counselor") renderCounselorGrid();
+  else renderCourseGrid();
 }
 
 function scheduleReload() {
@@ -763,7 +829,15 @@ function subscribeRealtime() {
     return;
   }
 
-  // 学期页：课程列表为静态数据，无需订阅
+  // 学期页：订阅同学自建课程的增删（课程列表为静态+自建动态）
+  const sem = currentSemester;
+  realtimeChannel = sb
+    .channel("semester-realtime-" + sem)
+    .on("postgres_changes", { event: "*", schema: "public", table: "custom_courses" }, (payload) => {
+      const c = payload.new || payload.old;
+      if (c && c.semester === sem) scheduleReload();
+    })
+    .subscribe();
 }
 
 // ============================================================
@@ -804,6 +878,34 @@ async function deleteItem(kind, itemId) {
   // 清理该导员名下全部配图（尽力而为）
   if (isCounselor) item.ratings.forEach((r) => { if (r.image_url) deleteStoredImage(r.image_url); });
   await reloadCurrent();
+}
+
+// 3) 自建课程的添加者删除课程
+async function deleteCustomCourse(course) {
+  if (!confirm(`确定删除课程「${course.name}」（编号 ${course.id}）吗？删除后不可恢复。`)) return;
+
+  // 1) 删除课程记录
+  const { error } = await sb.from("custom_courses").delete().eq("id", course.customId);
+  if (error) {
+    alert("删除失败：" + error.message);
+    return;
+  }
+
+  // 2) 判断该编号是否被其他课程共用（内置列表或其余学期的自建课程）
+  const builtinShared = Object.values(COURSES).some((list) => list.some((c) => c.id === course.id));
+  let customShared = false;
+  if (!builtinShared) {
+    const { data: others } = await sb
+      .from("custom_courses").select("id").neq("id", course.customId).eq("course_id", course.id);
+    customShared = !!(others && others.length);
+  }
+
+  // 3) 无共用时才级联删除该编号下的老师（其评分随外键级联删除）
+  if (!builtinShared && !customShared) {
+    await sb.from("teachers").delete().eq("course_id", course.id);
+  }
+
+  renderCourseGrid();
 }
 
 // ============================================================
@@ -931,6 +1033,7 @@ function bindEvents() {
   $("#btn-back").addEventListener("click", goBackToSemester);
   $("#btn-back-c").addEventListener("click", goBackFromCounselor);
   $("#btn-add-teacher").addEventListener("click", () => openAddItemModal("teacher"));
+  $("#btn-add-course").addEventListener("click", () => openAddItemModal("course"));
   $("#btn-add-counselor").addEventListener("click", () => openAddItemModal("counselor"));
   $("#btn-cancel-add").addEventListener("click", closeAddItemModal);
   $("#btn-confirm-add").addEventListener("click", confirmAddItem);

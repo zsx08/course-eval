@@ -53,6 +53,11 @@
     <!-- 学期 + 课程列表页 -->
     <main id="page-semester" class="page">
       <div class="semester-tabs" id="semester-tabs"></div>
+      <div class="page-head-row">
+        <h3>📚 课程列表</h3>
+        <span class="section-sub">点击课程查看老师评价，同学也可自行添加课程</span>
+        <button id="btn-add-course" class="btn btn-accent">＋ 添加课程</button>
+      </div>
       <div id="course-grid" class="course-grid"></div>
     </main>
 
@@ -96,6 +101,7 @@
       <h3 id="add-item-title">添加老师</h3>
       <p id="add-item-desc" class="modal-desc"></p>
       <input type="text" id="new-item-name" placeholder="姓名" maxlength="30" />
+      <input type="text" id="new-item-id" placeholder="课程编号（纯数字）" maxlength="12" hidden />
       <div class="modal-actions">
         <button id="btn-cancel-add" class="btn btn-ghost">取消</button>
         <button id="btn-confirm-add" class="btn btn-primary">添加</button>

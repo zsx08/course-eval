@@ -435,6 +435,9 @@ input:focus, textarea:focus { border-color: var(--purple); }
 }
 .counselor-card:hover { border-color: var(--accent); }
 .counselor-card .course-id { background: #fdf3dd; color: #a87a1e; }
+.custom-course-card { border-style: dashed; }
+.custom-course-card .course-id { background: #e8f4ee; color: #1e8e5a; }
+.btn-del-course { align-self: flex-start; margin-top: 6px; padding: 6px 14px; font-size: 12px; }
 
 /* ================= 评价配图 ================= */
 .rating-img {
