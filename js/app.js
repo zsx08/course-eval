@@ -56,6 +56,8 @@ let currentCourse = null;      // { id, name }
 let teachersCache = [];        // [{ id, course_id, name, ratings: [...], avg }]
 let realtimeChannel = null;    // 当前课程的实时订阅通道
 let reloadTimer = null;        // 实时事件防抖定时器
+let pendingReload = false;     // 用户正在输入时暂缓的刷新
+let draftCache = {};           // 各面板输入草稿（评论+滑块），重建后恢复
 
 const SESSION_KEY = "wq_cou…user";
 
@@ -253,6 +255,7 @@ async function loadTeachers() {
 }
 
 function renderTeacherPanels() {
+  captureDrafts(); // 先存草稿，防止重建时丢失输入
   const panelsEl = $("#teacher-panels");
   if (!teachersCache.length) {
     panelsEl.innerHTML = `
@@ -300,7 +303,8 @@ function buildTeacherPanel(t, idx) {
   }
 
   const my = t.myRating;
-  const myScore = my ? my.score : 5;
+  const draft = draftCache[t.id];
+  const myScore = draft ? draft.score : (my ? my.score : 5);
   const canDeleteTeacher = t.created_by && t.created_by === currentUser.student_id;
 
   panel.innerHTML = `
@@ -326,7 +330,7 @@ function buildTeacherPanel(t, idx) {
         <input type="range" min="0" max="10" step="1" value="${myScore}" class="score-slider" />
         <div class="score-value">${myScore}.0</div>
       </div>
-      <textarea class="rate-comment" maxlength="500" placeholder="留言（可选，将展示在评价面板上）">${my ? my.comment : ""}</textarea>
+      <textarea class="rate-comment" maxlength="500" placeholder="留言（可选，将展示在评价面板上）">${escapeHtml(draft ? draft.comment : (my ? my.comment : ""))}</textarea>
       <div class="rate-actions">
         ${my ? `<button class="btn btn-danger btn-del-rating">删除我的评价</button>` : ""}
         <button class="btn btn-primary btn-submit-rate">${my ? "更新评分" : "提交评分"}</button>
@@ -351,6 +355,17 @@ function buildTeacherPanel(t, idx) {
   // 删除老师（仅添加者显示）
   const btnDelTeacher = panel.querySelector(".btn-del-teacher");
   if (btnDelTeacher) btnDelTeacher.addEventListener("click", () => deleteTeacher(t.id));
+
+  // 失焦时若有待处理的刷新，执行它（用户在打字期间刷新已被暂缓）
+  const ta = panel.querySelector(".rate-comment");
+  if (ta) {
+    ta.addEventListener("blur", () => {
+      if (pendingReload) {
+        pendingReload = false;
+        loadTeachers();
+      }
+    });
+  }
 
   return panel;
 }
@@ -429,8 +444,34 @@ function scheduleReload() {
   if (reloadTimer) clearTimeout(reloadTimer);
   reloadTimer = setTimeout(() => {
     reloadTimer = null;
+    if (isUserTyping()) {
+      // 用户正在写评论：暂缓刷新，等他失焦再刷，避免输入被重建清掉
+      pendingReload = true;
+      return;
+    }
+    pendingReload = false;
     loadTeachers();
   }, 400);
+}
+
+function isUserTyping() {
+  const el = document.activeElement;
+  return !!(el && el.classList && el.classList.contains("rate-comment"));
+}
+
+// 保存所有面板输入中的草稿（评论文字 + 滑块值），重渲染后恢复
+function captureDrafts() {
+  draftCache = {};
+  document.querySelectorAll(".teacher-panel").forEach((panel) => {
+    const id = panel.dataset.teacherId;
+    const ta = panel.querySelector(".rate-comment");
+    const sl = panel.querySelector(".score-slider");
+    if (!ta && !sl) return;
+    draftCache[id] = {
+      comment: ta ? ta.value : "",
+      score: sl ? Number(sl.value) : null,
+    };
+  });
 }
 
 function subscribeCourseRealtime() {
